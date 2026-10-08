@@ -18,7 +18,7 @@ PowerShell 5.1, žiadne moduly.
 1. **Najprv skúška na jednej skupine** (overí prístup k AD, nič iné nečíta):
 
    ```powershell
-   .\Get-ADGroupMembers.ps1 -Group 'VNET\HRteam_write'
+   .\Get-ADGroupMembers.ps1 -Group 'HQ\HRteam_write'
    ```
 
    Vypíše prvých 30 riadkov a uloží `AD_Group_Members_<počítač>_<dátum>_adhoc.csv`.
@@ -73,11 +73,45 @@ Ukážka (vymyslené mená, nie skutočné oprávnenia):
 
 ```csv
 Group,GroupStatus,MemberType,Member,DisplayName,Enabled,NestingLevel,ParentGroup,MembershipPath
-VNET\HRteam_write,Expanded,User,VNET\jnovak,Ján Novák,True,1,VNET\HRteam_write,VNET\HRteam_write
-VNET\HRteam_write,Expanded,Group,VNET\HR_Managers,HR_Managers,,1,VNET\HRteam_write,VNET\HRteam_write
-VNET\HRteam_write,Expanded,User,VNET\mkrasna,Mária Krásna,True,2,VNET\HR_Managers,VNET\HRteam_write > VNET\HR_Managers
-VNET\Old_Group,NotFound,,,,,,,
+HQ\HRteam_write,Expanded,User,HQ\jnovak,Ján Novák,True,1,HQ\HRteam_write,HQ\HRteam_write
+HQ\HRteam_write,Expanded,Group,HQ\HR_Managers,HR_Managers,,1,HQ\HRteam_write,HQ\HRteam_write
+HQ\HRteam_write,Expanded,User,HQ\mkrasna,Mária Krásna,True,2,HQ\HR_Managers,HQ\HRteam_write > HQ\HR_Managers
+HQ\Old_Group,NotFound,,,,,,,
 ```
+
+## Report „kto kde má prístup“ (`New-AccessReport.ps1`)
+
+Spojí Share CSV, NTFS CSV a `AD_Group_Members_*.csv` do jedného súboru
+`Access_Report_<Server>_<dátum>.csv`. Skupinové oprávnenie sa rozpíše na jeden riadok
+na každého člena (aj z vnorených skupín), takže vo filtri nájdete osobu → všetky jej
+priečinky, alebo priečinok → všetkých ľudí. Beží ručne, s AD nekomunikuje.
+
+```powershell
+.\New-AccessReport.ps1 -InputDirectory 'C:\scripts\VNET_Samba_Audit\q report'
+```
+
+Najprv musí existovať `AD_Group_Members_*.csv` (krok vyššie), inak skript povie, čo spustiť.
+
+Užitočné prepínače: `-ShareName 'Hodnotenie*'` (len niektoré zdieľania), `-ExplicitOnly`
+(z NTFS iba oprávnenia nastavené priamo na priečinku, plus celý koreň zdieľania),
+`-MaxRowsPerFile 1000000` (po tomto počte riadkov začne nový súbor `_part2.csv`, aby ho
+zvládol Excel).
+
+Stĺpce: `Layer` (Share / NTFS), `ShareName`, `FolderPath`, `RelativePath`, `BoundaryType`,
+`Trustee`, `TrusteeKind` (Group / User / Other), `AccessType`, `Rights`, `RightsDetail`,
+`AppliesTo`, `IsInherited`, `InheritedFrom`, `GroupStatus`, `Person`, `PersonName`,
+`PersonType`, `Enabled`, `Via` (Direct / Group / NestedGroup), `NestingLevel`, `ParentGroup`,
+`MembershipPath`.
+
+- NTFS riadky sú len pri hraniciach oprávnení (koreň zdieľania, zablokované dedenie,
+  priečinky s vlastným záznamom). Ich ACL platí pre všetko pod nimi až po ďalšiu hranicu.
+- Prístup vyžaduje **obe vrstvy**: oprávnenie zdieľania aj NTFS. Výsledné právo je prísnejšie
+  z nich a `Deny` vždy vyhráva. Report vrstvy ukazuje vedľa seba, výsledné právo nepočíta.
+- `TrusteeKind = Other` (lokálne, `BUILTIN`, `Everyone`, iná doména) sa nerozbaľuje a nemá
+  `Person`. Skupina bez členov alebo nenájdená má jeden riadok s prázdnym `Person` a stavom
+  v `GroupStatus`.
+- Veľkosť: každý člen skupiny je jeden riadok, takže veľké zdieľania môžu dať milióny riadkov
+  (na 100 tisíc NTFS záznamov so 400 skupinami po 25 členoch vyšlo 2,4 milióna riadkov za 37 s).
 
 ## Čo skript rieši navyše
 
@@ -96,8 +130,9 @@ VNET\Old_Group,NotFound,,,,,,,
 
 ```powershell
 pwsh -File tests\Test-GetADGroupMembers.ps1      # alebo powershell.exe -File ...
+pwsh -File tests\Test-NewAccessReport.ps1
 ```
 
-Beží bez AD nad vymyslenou „databázou“ a overuje čítanie CSV, vnorenie, cykly, najkratšiu
+Obe súpravy bežia bez AD nad vymyslenými dátami; prvá nad vymyslenou „databázou“ a overuje čítanie CSV, vnorenie, cykly, najkratšiu
 cestu, limity, stavy skupín a zápis CSV (49 kontrol). **Nepokrýva samotné LDAP volania** –
 tie sa dajú overiť iba na doménovom stroji, preto je tam krok 1 (`-Group`).

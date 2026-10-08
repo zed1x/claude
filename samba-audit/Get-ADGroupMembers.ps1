@@ -18,7 +18,7 @@
 
     To check that AD access works, expand a single group first (nothing else is read):
 
-        .\Get-ADGroupMembers.ps1 -Group 'VNET\HRteam_write'
+        .\Get-ADGroupMembers.ps1 -Group 'HQ\HRteam_write'
 
     Strictly read-only. It only issues LDAP searches as the current user; any authenticated
     domain user can run it. It needs no modules (plain System.DirectoryServices), so it
@@ -238,7 +238,7 @@ function New-AdContext {
     if (-not $forestNc)  { $forestNc = $defaultNc }
 
     # NetBIOS name -> naming context, for every domain in the forest. The permission CSVs
-    # carry NetBIOS names (VNET\Group); LDAP needs the DN. Anything not in this map is a
+    # carry NetBIOS names (HQ\Group); LDAP needs the DN. Anything not in this map is a
     # local, BUILTIN or out-of-forest principal and is skipped.
     $domainMap = @{}
     try {
