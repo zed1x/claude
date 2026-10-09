@@ -704,7 +704,7 @@ function New-AccessReportFiles {
     $memberRows = @(Import-Csv -LiteralPath $MembersCsv -Encoding UTF8)
     foreach ($c in 'Group', 'GroupStatus', 'MemberType', 'Member') {
         if ($memberRows.Count -gt 0 -and -not ($memberRows[0].PSObject.Properties.Name -contains $c)) {
-            throw "Column '$c' not found in $membersCsv - was it made by Get-ADGroupMembers.ps1?"
+            throw "Column '$c' not found in $membersCsv - was it made by New-AccessReport.ps1?"
         }
     }
     foreach ($r in $memberRows) {
