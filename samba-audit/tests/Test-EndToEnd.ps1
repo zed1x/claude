@@ -139,12 +139,65 @@ function Get-AdGroupMemberRecords { param($Ctx, $Group) foreach ($m in $script:m
     Assert-Equal $r.Code 0 'wrong domain: still finishes'
     Assert-Equal ($r.Text -match 'No trustee matched a domain of this forest \(HQ\)') $true 'wrong domain: warns and names the real domain'
 
+    # --- the default: one command scans, asks AD and writes the report --------------------------
+    # (on Linux the ACL calls fail, so the scan logs errors instead of rows; the wiring is what is checked here)
+    $tree = Join-Path $tmp 'tree'
+    New-Item -ItemType Directory -Path (Join-Path $tree 'a\b') -Force | Out-Null
+    $scanOut = Join-Path $tmp 'scan-out'
+    $r = Invoke-Copy @('-Path', $tree, '-OutputDirectory', $scanOut)
+    if ($r.Code -ne 0) { Write-Host $r.Text }
+    Assert-Equal $r.Code 0 'scan mode: exit code'
+    Assert-Equal ($r.Text -match 'Step 1/3') $true 'scan mode: three steps'
+    Assert-Equal ($r.Text -match 'Step 3/3') $true 'scan mode: last step is the report'
+    Assert-Equal ($r.Text.IndexOf('Checking Active Directory access first') -lt $r.Text.IndexOf('Step 1/3')) $true 'scan mode: AD is checked before the scan starts'
+    foreach ($prefix in 'Share_Permissions_', 'NTFS_Permissions_', 'Scan_Errors_', 'AD_Group_Members_', 'Access_Report_') {
+        Assert-Equal @(Get-ChildItem -LiteralPath $scanOut -Filter "$prefix*.csv").Count 1 "scan mode: $prefix file is written"
+    }
+    Assert-Equal @(Get-ChildItem -LiteralPath $scanOut -Filter '*.partial').Count 0 'scan mode: no .partial left'
+
+    # default folder = 'q report' next to the script
+    $before = @(Get-ChildItem -LiteralPath $inbox -Filter 'Access_Report_*.csv').Count     # $inbox is the folder 'q report' next to the copy
+    $r = Invoke-Copy @('-Path', $tree)
+    Assert-Equal $r.Code 0 'default folder: exit code'
+    Assert-Equal @(Get-ChildItem -LiteralPath $inbox -Filter 'Access_Report_*.csv').Count ($before + 1) "default folder: report lands in 'q report' next to the script"
+
+    # -SkipAd = the old scan only
+    $scanOnly = Join-Path $tmp 'scan-only'
+    $r = Invoke-Copy @('-Path', $tree, '-OutputDirectory', $scanOnly, '-SkipAd')
+    Assert-Equal $r.Code 0 'SkipAd: exit code'
+    Assert-Equal @(Get-ChildItem -LiteralPath $scanOnly -Filter '*_Permissions_*.csv').Count 2 'SkipAd: share and NTFS CSV written'
+    Assert-Equal @(Get-ChildItem -LiteralPath $scanOnly -Filter 'AD_Group_Members_*').Count 0 'SkipAd: no AD step'
+    Assert-Equal @(Get-ChildItem -LiteralPath $scanOnly -Filter 'Access_Report_*').Count 0 'SkipAd: no report'
+
+    # -ListSharesOnly writes nothing
+    $dry = Join-Path $tmp 'dry'
+    $r = Invoke-Copy @('-Path', $tree, '-OutputDirectory', $dry, '-ListSharesOnly')
+    Assert-Equal $r.Code 0 'ListSharesOnly: exit code'
+    Assert-Equal ($r.Text -match 'WOULD be scanned') $true 'ListSharesOnly: shows the targets'
+    Assert-Equal (Test-Path $dry) $false 'ListSharesOnly: writes nothing'
+
+    # -InputDirectory still means "do not scan"
+    $r = Invoke-Copy @('-InputDirectory', $inbox)
+    Assert-Equal ($r.Text -match 'Scanning this server') $false 'InputDirectory: does not scan'
+
+    # with the real AD layer on a machine that has none, the problem shows before any scan work
+    if ($PSVersionTable.Platform -eq 'Unix') {
+        $early = Join-Path $tmp 'early'
+        $r = & $ps -NoProfile -File $real -Path $tree -OutputDirectory $early 2>&1 | Out-String
+        Assert-Equal ($LASTEXITCODE -ne 0) $true 'no AD: fails'
+        Assert-Equal (Test-Path $early) $false 'no AD: fails before the scan wrote anything'
+    }
+
     # --- errors you can make --------------------------------------------------------------------
     $r = Invoke-Copy @('-InputDirectory', (Join-Path $tmp 'does-not-exist'))
     Assert-Equal ($r.Code -ne 0 -and $r.Text -match 'Input directory not found') $true 'bad folder: clear error'
     $empty = Join-Path $tmp 'empty'; New-Item -ItemType Directory -Path $empty | Out-Null
     $r = Invoke-Copy @('-InputDirectory', $empty)
     Assert-Equal ($r.Code -ne 0 -and $r.Text -match 'No export set') $true 'empty folder: clear error'
+    Assert-Equal ($r.Text -match 'contains no CSV files') $true 'empty folder: says it is empty'
+    Set-Content -LiteralPath (Join-Path $empty 'something.csv') -Value 'x'
+    $r = Invoke-Copy @('-InputDirectory', $empty)
+    Assert-Equal ($r.Text -match 'CSV files in the folder: something\.csv') $true 'folder without a set: lists what is there'
 }
 finally {
     Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue

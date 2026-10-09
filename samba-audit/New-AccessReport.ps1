@@ -1,31 +1,43 @@
 <#
 .SYNOPSIS
-    One script: reads the permission CSVs, asks Active Directory who is in the groups,
-    and writes one CSV report of who can reach which folder and through which group.
+    One command: scans this file server for who has which permissions, asks Active Directory
+    who is in the groups, and writes one CSV report of who can reach which folder and
+    through which group. Everything lands in the 'q report' folder next to the script.
 
 .DESCRIPTION
-    Run it by hand on a domain-joined Windows machine, from any folder:
+    Run it by hand, on the file server, in an elevated PowerShell (7 or Windows PowerShell 5.1):
 
-        powershell -ExecutionPolicy Bypass -File .\New-AccessReport.ps1 -InputDirectory 'C:\scripts\VNET_Samba_Audit\q report'
+        pwsh -ExecutionPolicy Bypass -File 'C:\scripts\VNET_Samba_Audit\New-AccessReport.ps1'
 
-    It takes the newest export set in that folder (Share_Permissions_*, NTFS_Permissions_*,
-    same server and date), looks every group trustee up in Active Directory - nested groups
-    included - and writes
-        AD_Group_Members_<Server>_<date>.csv    who is in each group (also useful on its own)
-        Access_Report_<Server>_<date>.csv       the report
-    next to the NTFS CSV. It only reads: LDAP searches as the current user, no modules.
+    With no parameters it does three things and writes into C:\scripts\VNET_Samba_Audit\q report
+    (the folder 'q report' next to the script):
 
-    Check that AD access works before a big run - this needs no CSV at all:
+      1. SCAN   walks every non-special share and writes
+                  Share_Permissions_<Server>_<date>.csv
+                  NTFS_Permissions_<Server>_<date>.csv
+                  Scan_Errors_<Server>_<date>.csv
+                It is the scan of Get-FileServerPermissions.ps1: read-only, NTFS entries only at
+                permission boundaries (share root, blocked inheritance, folders with their own entries).
+      2. GROUPS looks every group trustee up in Active Directory, nested groups included, and writes
+                  AD_Group_Members_<Server>_<date>.csv
+      3. REPORT writes
+                  Access_Report_<Server>_<date>.csv     who can reach which folder, through which group
 
-        powershell -ExecutionPolicy Bypass -File .\New-AccessReport.ps1 -Group 'HQ\Domain Admins'
+    AD is checked first, so a problem with it shows up before the long scan, not after.
+    Nothing is deleted or changed; old CSVs in the folder are left alone.
+
+    Other ways to run it
+      -ListSharesOnly                 show what would be scanned, scan nothing
+      -InputDirectory '<folder>'      skip the scan and use the newest CSV set already in a folder
+      -Group 'HQ\Domain Admins'       only test AD: expand one group, no scan, no CSV needed
+      -SkipAd                         scan only (the three scan CSVs), no AD, no report
+      -Resume                         continue an interrupted scan
 
     Report columns
       Layer           Share (SMB share permission) or NTFS (folder permission)
       ShareName, FolderPath, RelativePath, BoundaryType
-                      where the permission sits. NTFS rows exist only at permission
-                      boundaries: the share root, folders that block inheritance and
-                      folders with their own entries. Their ACL applies to everything
-                      below until the next boundary.
+                      where the permission sits. NTFS rows exist only at permission boundaries; their
+                      ACL applies to everything below until the next boundary.
       Trustee         who the ACL names (a group, a user, BUILTIN\Users, ...)
       TrusteeKind     Group | User | Other (local, BUILTIN, Everyone, other domains)
       AccessType      Allow | Deny
@@ -45,21 +57,53 @@
     The effective right is the more restrictive of the two, and a Deny wins over an Allow.
     The report lists the layers side by side and does not compute that for you.
 
-    Membership is read from AD at the moment you run it, not as of the scan date.
+    Membership is read from AD at the moment you run it.
 
     Size: every group entry becomes one row per member, so a large share can run to
     millions of rows. Output is split into parts of -MaxRowsPerFile rows (default 1,000,000,
     which stays under the Excel row limit): ..._part2.csv, ... Use -ShareName or
     -ExplicitOnly to get a smaller report.
 
+.PARAMETER OutputDirectory
+    Where the files are written. Default: the 'q report' folder next to the script (with -InputDirectory
+    or -NtfsCsv: the folder of the NTFS CSV).
+
+.PARAMETER ShareName
+    Only these shares (wildcards accepted) - for the scan and for the report.
+
+.PARAMETER Path
+    Scan these roots instead of auto-discovering shares.
+
+.PARAMETER MaxDepth
+    Stop descending past this depth below the share root. 0 = unlimited.
+
+.PARAMETER ThrottleLimit
+    Parallel scan workers (ACL reads are I/O bound). Default 8.
+
+.PARAMETER ExcludePrincipal
+    Trustees left out of the scan (full account name or the part after the backslash).
+    Replaces the default list (SYSTEM, CREATOR OWNER, Administrators, Domain Admins, ...).
+
+.PARAMETER IncludeGenericPrincipals
+    Scan every trustee, no exclusion list.
+
+.PARAMETER ListSharesOnly
+    Dry run: list the shares and paths that would be scanned, then stop.
+
+.PARAMETER Resume
+    Continue an interrupted scan, appending to its CSVs.
+
+.PARAMETER SkipAd
+    Scan only: write the scan CSVs and stop.
+
 .PARAMETER InputDirectory
-    Folder with the CSVs; the newest complete export set is used.
+    Use the newest complete CSV set (Share + NTFS, same server and date) in this folder instead of scanning.
 
 .PARAMETER ScanDate
     With -InputDirectory, use this export date (yyyyMMdd) instead of the newest.
 
 .PARAMETER NtfsCsv
-    Use this NTFS CSV instead of -InputDirectory.
+    Use this NTFS CSV instead of scanning.
 
 .PARAMETER ShareCsv
     The matching share CSV (optional).
@@ -69,13 +113,7 @@
 
 .PARAMETER Group
     Test mode: expand only these groups ('DOMAIN\Name'), print the members, write
-    AD_Group_Members_<computer>_<date>_adhoc.csv. No CSVs needed.
-
-.PARAMETER OutputDirectory
-    Where the files are written. Defaults to the folder of the NTFS CSV.
-
-.PARAMETER ShareName
-    Only these shares (wildcards accepted).
+    AD_Group_Members_<computer>_<date>_adhoc.csv. No scan, no CSVs needed.
 
 .PARAMETER ExplicitOnly
     NTFS: only entries set directly on a folder (not inherited), plus everything on the
@@ -95,29 +133,38 @@
     Stop descending into nested groups past this level; the group is then marked Truncated.
 
 .EXAMPLE
-    .\New-AccessReport.ps1 -InputDirectory 'C:\scripts\VNET_Samba_Audit\q report'
+    pwsh -ExecutionPolicy Bypass -File .\New-AccessReport.ps1
+    Scan this server, ask AD, write the report - all into 'q report'.
 
 .EXAMPLE
-    .\New-AccessReport.ps1 -InputDirectory .\Reports -ShareName 'Hodnotenie*' -DoNotExpand 'Domain Users'
+    pwsh -ExecutionPolicy Bypass -File .\New-AccessReport.ps1 -InputDirectory 'C:\scripts\VNET_Samba_Audit\q report'
+    No scan: build the report from the newest CSV set already in that folder.
+
+.EXAMPLE
+    pwsh -ExecutionPolicy Bypass -File .\New-AccessReport.ps1 -ShareName 'Hodnotenie*' -DoNotExpand 'Domain Users'
 #>
-[CmdletBinding(DefaultParameterSetName = 'Directory')]
+[CmdletBinding(DefaultParameterSetName = 'Scan')]
 param(
-    [Parameter(ParameterSetName = 'Directory')]
-    [string]$InputDirectory,
+    # --- scan this server (the default) ---
+    [Parameter(ParameterSetName = 'Scan')] [string[]]$Path,
+    [Parameter(ParameterSetName = 'Scan')] [int]$MaxDepth = 0,
+    [Parameter(ParameterSetName = 'Scan')] [ValidateRange(1, 64)][int]$ThrottleLimit = 8,
+    [Parameter(ParameterSetName = 'Scan')] [string[]]$ExcludePrincipal,
+    [Parameter(ParameterSetName = 'Scan')] [switch]$IncludeGenericPrincipals,
+    [Parameter(ParameterSetName = 'Scan')] [switch]$ListSharesOnly,
+    [Parameter(ParameterSetName = 'Scan')] [switch]$Resume,
+    [Parameter(ParameterSetName = 'Scan')] [switch]$SkipAd,
 
-    [Parameter(ParameterSetName = 'Directory')]
-    [ValidatePattern('^\d{8}$')]
-    [string]$ScanDate,
+    # --- or use CSVs that already exist ---
+    [Parameter(ParameterSetName = 'Directory')] [string]$InputDirectory,
+    [Parameter(ParameterSetName = 'Directory')] [ValidatePattern('^\d{8}$')] [string]$ScanDate,
+    [Parameter(ParameterSetName = 'Files', Mandatory)] [string]$NtfsCsv,
+    [Parameter(ParameterSetName = 'Files')] [string]$ShareCsv,
 
-    [Parameter(ParameterSetName = 'Files', Mandatory)]
-    [string]$NtfsCsv,
+    # --- or only test Active Directory ---
+    [Parameter(ParameterSetName = 'Groups', Mandatory)] [string[]]$Group,
 
-    [Parameter(ParameterSetName = 'Files')]
-    [string]$ShareCsv,
-
-    [Parameter(ParameterSetName = 'Groups', Mandatory)]
-    [string[]]$Group,
-
+    # --- every mode ---
     [string]  $MembersCsv,
     [string]  $OutputDirectory,
     [string[]]$ShareName,
@@ -685,6 +732,524 @@ function Invoke-GroupMemberExport {
 
 #endregion
 
+#region ------------------------------------------------------------- permission scan
+
+function Invoke-PermissionScan {
+    # The scan of Get-FileServerPermissions.ps1, unchanged in what it reads and writes: walks the
+    # local shares and writes Share_Permissions / NTFS_Permissions / Scan_Errors CSVs.
+    # Read-only. Returns the three CSV paths, or $null for -ListSharesOnly.
+    param(
+        [string[]]$Path,
+        [string[]]$ShareName,
+        [string]  $OutputDirectory,
+        [int]     $MaxDepth = 0,
+        [int]     $ThrottleLimit = 8,
+        [string[]]$ExcludePrincipal,
+        [switch]  $IncludeGenericPrincipals,
+        [switch]  $ListSharesOnly,
+        [switch]  $Resume
+    )
+
+    $scanWatch = [System.Diagnostics.Stopwatch]::StartNew()
+    $Server    = $env:COMPUTERNAME
+    $scanStamp = (Get-Date).ToString('s')
+
+    $DefaultExclude = @(
+        'NT AUTHORITY\SYSTEM'
+        'CREATOR OWNER'
+        'BUILTIN\Administrators'
+        'Domain Admins'
+        'NT SERVICE\TrustedInstaller'
+        'BUILTIN\Server Operators'
+    )
+    $excludeList = if ($IncludeGenericPrincipals) { @() }
+                   elseif ($ExcludePrincipal)     { $ExcludePrincipal }
+                   else                            { $DefaultExclude }
+
+    #region -------------------------------------------------------- share discovery
+
+    function Get-TargetShare {
+        $result = [System.Collections.Generic.List[object]]::new()
+
+        if ($Path) {
+            foreach ($p in $Path) {
+                if (-not (Test-Path -LiteralPath $p)) {
+                    Write-Warning "Path not found, skipping: $p"
+                    continue
+                }
+                $full = (Resolve-Path -LiteralPath $p).ProviderPath.TrimEnd('\')
+                # if this path is (or sits under) a real share, borrow that share's name
+                $match = $null
+                try {
+                    $match = Get-SmbShare -ErrorAction Stop | Where-Object {
+                        -not $_.Special -and $_.Path -and
+                        ($full -eq $_.Path.TrimEnd('\') -or $full.StartsWith($_.Path.TrimEnd('\') + '\', 'OrdinalIgnoreCase'))
+                    } | Select-Object -First 1
+                } catch { }
+                $result.Add([pscustomobject]@{
+                    Name        = if ($match) { $match.Name } else { Split-Path $full -Leaf }
+                    Path        = $full
+                    Description = if ($match) { $match.Description } else { 'Explicit -Path target' }
+                    IsRealShare = [bool]$match
+                })
+            }
+            return $result
+        }
+
+        $shares = $null
+        try {
+            $shares = Get-SmbShare -ErrorAction Stop | Where-Object { -not $_.Special }
+        } catch {
+            Write-Verbose "SmbShare module unavailable, falling back to WMI."
+            $shares = Get-CimInstance -ClassName Win32_Share -ErrorAction Stop |
+                Where-Object { $_.Type -eq 0 } |
+                ForEach-Object { [pscustomobject]@{ Name = $_.Name; Path = $_.Path; Description = $_.Description } }
+        }
+
+        foreach ($s in $shares) {
+            if ($s.Name -in @('NETLOGON', 'SYSVOL')) { continue }
+            if (-not $s.Path) { continue }
+            if ($ShareName -and -not ($ShareName | Where-Object { $s.Name -like $_ })) { continue }
+            $result.Add([pscustomobject]@{
+                Name = $s.Name; Path = $s.Path.TrimEnd('\'); Description = $s.Description; IsRealShare = $true
+            })
+        }
+        $result
+    }
+
+    function Get-ShareAccessRow {
+        param([object]$Share)
+        if (-not $Share.IsRealShare) { return @() }
+        try {
+            Get-SmbShareAccess -Name $Share.Name -ErrorAction Stop | ForEach-Object {
+                [pscustomobject]@{
+                    Server = $Server; ShareName = $Share.Name; SharePath = $Share.Path
+                    Description = $Share.Description
+                    Trustee = $_.AccountName
+                    AccessType = [string]$_.AccessControlType
+                    AccessRight = [string]$_.AccessRight
+                    ScanTimestamp = $scanStamp
+                }
+            }
+        } catch {
+            Write-Warning "Could not read share ACL for '$($Share.Name)': $($_.Exception.Message)"
+            @()
+        }
+    }
+
+    $targets = Get-TargetShare
+    if (-not $targets -or $targets.Count -eq 0) { throw "No shares or paths to scan." }
+
+    #endregion
+
+    #region ------------------------------------------------------------- dry run
+
+    if ($ListSharesOnly) {
+        Write-Host ""
+        Write-Host "Targets that WOULD be scanned on $Server" -ForegroundColor Cyan
+        Write-Host ("-" * 78)
+        foreach ($t in $targets) {
+            $topCount = $null; $readable = $true; $note = ''
+            try {
+                $topCount = ([System.IO.Directory]::EnumerateDirectories($t.Path)  | Measure-Object).Count
+            } catch { $readable = $false; $note = $_.Exception.Message }
+
+            Write-Host ("{0,-22} {1}" -f $t.Name, $t.Path) -ForegroundColor White
+            if ($readable) {
+                Write-Host ("{0,-22} {1:N0} top-level folders" -f '', $topCount) -ForegroundColor DarkGray
+            } else {
+                Write-Host ("{0,-22} UNREADABLE - {1}" -f '', $note) -ForegroundColor Red
+            }
+            foreach ($a in (Get-ShareAccessRow $t)) {
+                Write-Host ("{0,-22} share ACL: {1} = {2} ({3})" -f '', $a.Trustee, $a.AccessRight, $a.AccessType) -ForegroundColor DarkGray
+            }
+        }
+        Write-Host ("-" * 78)
+        Write-Host ("{0} target(s). Excluded trustees: {1}" -f $targets.Count,
+            $(if ($excludeList) { $excludeList -join ', ' } else { '(none - reporting everything)' }))
+        Write-Host ""
+        Write-Host "Top-level counts only - the full crawl descends the entire tree." -ForegroundColor Yellow
+        Write-Host "Re-run without -ListSharesOnly to scan." -ForegroundColor Yellow
+        return $null
+    }
+
+    #endregion
+
+    #region ------------------------------------------------------------- worker
+
+    # Runs inside each runspace. Self-contained: everything it needs is defined here,
+    # because runspaces do not inherit the caller's functions.
+    $WorkerScript = {
+        param($Job, $Cfg, $Queue, $ErrQueue, $Counters)
+
+        $ACC = [System.Security.AccessControl.AccessControlSections]::Access
+        $OWN = [System.Security.AccessControl.AccessControlSections]::Owner
+        $SID = [System.Security.Principal.SecurityIdentifier]
+        $sidCache = @{}
+
+        function ConvertTo-LongPath([string]$p) {
+            if ($p.StartsWith('\\?\')) { return $p }
+            if ($p.StartsWith('\\'))   { return '\\?\UNC\' + $p.Substring(2) }
+            '\\?\' + $p
+        }
+        function Format-CsvField($v) {
+            $s = if ($null -eq $v) { '' } else { [string]$v }
+            if ($s.IndexOfAny([char[]]@(',', '"', "`r", "`n")) -ge 0) { '"' + $s.Replace('"', '""') + '"' } else { $s }
+        }
+        function Get-DirSecurity([System.IO.DirectoryInfo]$d, $sections) {
+            if ($Cfg.UseAclExt) { [System.IO.FileSystemAclExtensions]::GetAccessControl($d, $sections) }
+            else                { $d.GetAccessControl($sections) }
+        }
+        function Resolve-Sid($ref) {
+            $key = $ref.Value
+            if ($sidCache.ContainsKey($key)) { return $sidCache[$key] }
+            $out = try {
+                @{ Name = $ref.Translate([System.Security.Principal.NTAccount]).Value; Resolved = $true }
+            } catch {
+                @{ Name = $key; Resolved = $false }
+            }
+            $sidCache[$key] = $out
+            $out
+        }
+        function Get-SimpleRights([int]$v) {
+            # generic rights first - they show up as large negative integers
+            if ($v -band 0x10000000) { return 'FullControl' }         # GENERIC_ALL
+            if (($v -band 2032127) -eq 2032127) { return 'FullControl' }
+            if (($v -band 197055)  -eq 197055)  { return 'Modify' }
+            $canRead  = ($v -band 131209) -eq 131209
+            $canWrite = ($v -band 278)    -eq 278
+            $canExec  = ($v -band 32)     -eq 32
+            if ($canRead -and $canWrite -and $canExec) { return 'ReadWriteNoDelete' }
+            if ($canRead -and $canExec)  { return 'ReadExecute' }
+            if ($canRead)                { return 'ReadExecute' }
+            if ($canWrite)               { return 'Write' }
+            if ($v -band 1)              { return 'ListOnly' }
+            'Special'
+        }
+        function Get-AppliesTo($inheritFlags, $propFlags) {
+            $c = ($inheritFlags -band 1) -ne 0   # ContainerInherit
+            $o = ($inheritFlags -band 2) -ne 0   # ObjectInherit
+            $io = ($propFlags -band 2) -ne 0     # InheritOnly
+            $np = ($propFlags -band 1) -ne 0     # NoPropagateInherit
+            $t = if (-not $c -and -not $o) { 'This folder only' }
+                 elseif ($c -and $o -and -not $io) { 'This folder, subfolders and files' }
+                 elseif ($c -and $o -and $io)      { 'Subfolders and files only' }
+                 elseif ($c -and -not $io)         { 'This folder and subfolders' }
+                 elseif ($c -and $io)              { 'Subfolders only' }
+                 elseif ($o -and -not $io)         { 'This folder and files' }
+                 else                              { 'Files only' }
+            if ($np) { "$t (this level only)" } else { $t }
+        }
+        function Test-Excluded([string]$account) {
+            if (-not $Cfg.Exclude -or $Cfg.Exclude.Count -eq 0) { return $false }
+            $leaf = $account
+            $k = $account.LastIndexOf('\')
+            if ($k -ge 0) { $leaf = $account.Substring($k + 1) }
+            foreach ($e in $Cfg.Exclude) {
+                if ($account -eq $e -or $leaf -eq $e) { return $true }
+                $ek = $e.LastIndexOf('\')
+                if ($ek -ge 0 -and $leaf -eq $e.Substring($ek + 1)) { return $true }
+            }
+            $false
+        }
+
+        $localCount = 0
+        # stack frames: display path, relative path, depth, nearest ancestor boundary
+        $stack = [System.Collections.Generic.Stack[object]]::new()
+        $stack.Push(@{ P = $Job.Start; Rel = $Job.Rel; D = $Job.Depth; From = $Job.From })
+
+        while ($stack.Count -gt 0) {
+            $f = $stack.Pop()
+            $localCount++
+
+            $di = $null; $sec = $null
+            try {
+                $di  = New-Object System.IO.DirectoryInfo((ConvertTo-LongPath $f.P))
+                $sec = Get-DirSecurity $di $ACC
+            } catch {
+                $ErrQueue.Enqueue((@(
+                    $Cfg.Server, $f.P,
+                    $(if ($_.Exception -is [System.UnauthorizedAccessException]) { 'AccessDenied' }
+                      elseif ($_.Exception -is [System.IO.PathTooLongException]) { 'PathTooLong' }
+                      elseif ($_.Exception -is [System.IO.DirectoryNotFoundException]) { 'NotFound' }
+                      else { 'IOError' }),
+                    $_.Exception.Message, $Cfg.Stamp
+                ) | ForEach-Object { Format-CsvField $_ }) -join ',')
+                continue
+            }
+
+            $protected = $sec.AreAccessRulesProtected
+            $rules = @($sec.GetAccessRules($true, $true, $SID))
+            $hasExplicit = $false
+            foreach ($r in $rules) { if (-not $r.IsInherited) { $hasExplicit = $true; break } }
+
+            $isRoot = ($f.Rel -eq '' -and $Job.IsRoot)
+            $isBoundary = $isRoot -or $protected -or $hasExplicit
+
+            if ($isBoundary) {
+                $bType = if ($isRoot) { 'Root' } elseif ($protected) { 'Blocked' } else { 'Explicit' }
+
+                $owner = ''
+                try   { $owner = (Get-DirSecurity $di ($ACC -bor $OWN)).GetOwner([System.Security.Principal.NTAccount]).Value }
+                catch { try { $owner = $sec.GetOwner($SID).Value } catch { $owner = '' } }
+
+                $depth = if ($f.Rel) { ($f.Rel -split '\\').Count } else { 0 }
+                $emitted = 0
+
+                foreach ($r in $rules) {
+                    $acct = Resolve-Sid $r.IdentityReference
+                    if (Test-Excluded $acct.Name) { continue }
+
+                    $dom = ''; $nm = $acct.Name
+                    $k = $nm.IndexOf('\')
+                    if ($k -ge 0) { $dom = $nm.Substring(0, $k); $nm = $nm.Substring($k + 1) }
+
+                    $rv = [int]$r.FileSystemRights
+                    $Queue.Enqueue((@(
+                        $Cfg.Server, $Job.ShareName, $Job.SharePath, $f.P, $f.Rel, $depth,
+                        $bType, $protected, $owner,
+                        $acct.Name, $dom, $nm, $acct.Resolved,
+                        [string]$r.AccessControlType,
+                        (Get-SimpleRights $rv), [string]$r.FileSystemRights,
+                        $r.IsInherited, $(if ($r.IsInherited) { $f.From } else { '' }),
+                        (Get-AppliesTo ([int]$r.InheritanceFlags) ([int]$r.PropagationFlags)),
+                        $Cfg.Stamp
+                    ) | ForEach-Object { Format-CsvField $_ }) -join ',')
+                    $emitted++
+                }
+
+                # a boundary whose every ACE was filtered still matters - record that it exists
+                if ($emitted -eq 0) {
+                    $Queue.Enqueue((@(
+                        $Cfg.Server, $Job.ShareName, $Job.SharePath, $f.P, $f.Rel, $depth,
+                        $bType, $protected, $owner,
+                        '(all trustees filtered)', '', '(all trustees filtered)', $true,
+                        'Allow', 'Special', '', $false, '', '', $Cfg.Stamp
+                    ) | ForEach-Object { Format-CsvField $_ }) -join ',')
+                }
+            }
+
+            # descend
+            # the share-root work item covers the root only; its children are separate
+            # work items, so descending here would scan the whole tree twice
+            if ($Job.RootOnly) { continue }
+            if ($Cfg.MaxDepth -gt 0 -and $f.D -ge $Cfg.MaxDepth) { continue }
+            try {
+                foreach ($sub in [System.IO.Directory]::EnumerateDirectories((ConvertTo-LongPath $f.P))) {
+                    $name = [System.IO.Path]::GetFileName($sub)
+                    $childDisplay = $f.P.TrimEnd('\') + '\' + $name
+                    try {
+                        $attr = [System.IO.File]::GetAttributes($sub)
+                        if (($attr -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { continue }  # junction / symlink
+                    } catch { }
+                    $stack.Push(@{
+                        P    = $childDisplay
+                        Rel  = if ($f.Rel) { "$($f.Rel)\$name" } else { $name }
+                        D    = $f.D + 1
+                        From = if ($isBoundary) { $f.Rel } else { $f.From }
+                    })
+                }
+            } catch {
+                $ErrQueue.Enqueue((@(
+                    $Cfg.Server, $f.P,
+                    $(if ($_.Exception -is [System.UnauthorizedAccessException]) { 'AccessDenied' } else { 'IOError' }),
+                    $_.Exception.Message, $Cfg.Stamp
+                ) | ForEach-Object { Format-CsvField $_ }) -join ',')
+            }
+
+            if ($localCount -ge 500) {
+                [System.Threading.Monitor]::Enter($Counters.SyncRoot)
+                try { $Counters.Folders += $localCount } finally { [System.Threading.Monitor]::Exit($Counters.SyncRoot) }
+                $localCount = 0
+            }
+        }
+
+        [System.Threading.Monitor]::Enter($Counters.SyncRoot)
+        try { $Counters.Folders += $localCount; $Counters.Done++ } finally { [System.Threading.Monitor]::Exit($Counters.SyncRoot) }
+    }
+
+    #endregion
+
+    #region --------------------------------------------------------------- setup
+
+    if (-not (Test-Path $OutputDirectory)) { New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null }
+
+    $stateFile = Join-Path $OutputDirectory ".scanstate_$Server.json"
+    $state = $null
+    if ($Resume -and (Test-Path $stateFile)) {
+        $state = Get-Content $stateFile -Raw | ConvertFrom-Json
+        Write-Host "Resuming previous scan ($($state.Completed.Count) work items already done)." -ForegroundColor Yellow
+    }
+
+    $stampDate = (Get-Date).ToString('yyyyMMdd')
+    $ntfsCsv  = if ($state) { $state.NtfsCsv }  else { Join-Path $OutputDirectory "NTFS_Permissions_${Server}_${stampDate}.csv" }
+    $shareCsv = if ($state) { $state.ShareCsv } else { Join-Path $OutputDirectory "Share_Permissions_${Server}_${stampDate}.csv" }
+    $errCsv   = if ($state) { $state.ErrorCsv } else { Join-Path $OutputDirectory "Scan_Errors_${Server}_${stampDate}.csv" }
+
+    $completed = New-Object System.Collections.Generic.HashSet[string]
+    if ($state) { foreach ($c in $state.Completed) { [void]$completed.Add($c) } }
+
+    # share-level ACLs (rewritten in full each run - cheap)
+    if (-not $Resume -or -not (Test-Path $shareCsv)) {
+        $shareRows = foreach ($t in $targets) { Get-ShareAccessRow $t }
+        if ($shareRows) { $shareRows | Export-Csv -Path $shareCsv -NoTypeInformation -Encoding UTF8 }
+        else { 'Server,ShareName,SharePath,Description,Trustee,AccessType,AccessRight,ScanTimestamp' |
+                 Set-Content -Path $shareCsv -Encoding UTF8 }
+    }
+
+    $append = $Resume -and (Test-Path $ntfsCsv)
+    $enc = [System.Text.UTF8Encoding]::new($false)
+    $ntfsWriter = [System.IO.StreamWriter]::new($ntfsCsv, $append, $enc)
+    $errWriter  = [System.IO.StreamWriter]::new($errCsv,  $append, $enc)
+    if (-not $append) {
+        $ntfsWriter.WriteLine('Server,ShareName,SharePath,FolderPath,RelativePath,Depth,BoundaryType,InheritanceBroken,Owner,Trustee,TrusteeDomain,TrusteeName,SidResolved,AccessType,RightsSimple,RightsRaw,IsInherited,InheritedFrom,AppliesTo,ScanTimestamp')
+        $errWriter.WriteLine('Server,Path,ErrorType,Message,ScanTimestamp')
+    }
+
+    # build work items: the share root, then one per top-level subfolder
+    $jobs = [System.Collections.Generic.List[object]]::new()
+    foreach ($t in $targets) {
+        $rootKey = "$($t.Name)|<root>"
+        if (-not $completed.Contains($rootKey)) {
+            $jobs.Add([pscustomobject]@{
+                Key = $rootKey; ShareName = $t.Name; SharePath = $t.Path
+                Start = $t.Path; Rel = ''; Depth = 0; From = ''; IsRoot = $true; RootOnly = $true
+            })
+        }
+        try {
+            foreach ($sub in [System.IO.Directory]::EnumerateDirectories($t.Path)) {
+                $name = [System.IO.Path]::GetFileName($sub)
+                $key = "$($t.Name)|$name"
+                if ($completed.Contains($key)) { continue }
+                $jobs.Add([pscustomobject]@{
+                    Key = $key; ShareName = $t.Name; SharePath = $t.Path
+                    Start = $t.Path.TrimEnd('\') + '\' + $name; Rel = $name; Depth = 1; From = ''
+                    IsRoot = $false; RootOnly = $false
+                })
+            }
+        } catch {
+            $errWriter.WriteLine(('{0},{1},{2},{3},{4}' -f $Server, $t.Path, 'AccessDenied',
+                '"' + $_.Exception.Message.Replace('"','""') + '"', $scanStamp))
+        }
+    }
+
+    Write-Host ""
+    Write-Host "Scanning $($targets.Count) target(s) on $Server" -ForegroundColor Cyan
+    Write-Host ("  work items   : {0:N0}" -f $jobs.Count)
+    Write-Host ("  parallelism  : {0}" -f $ThrottleLimit)
+    Write-Host ("  max depth    : {0}" -f $(if ($MaxDepth -gt 0) { $MaxDepth } else { 'unlimited' }))
+    Write-Host ("  excluding    : {0}" -f $(if ($excludeList) { $excludeList -join ', ' } else { '(nothing)' }))
+    Write-Host ""
+
+    #endregion
+
+    #region ----------------------------------------------------------- run scan
+
+    $cfg = @{
+        Server   = $Server
+        Stamp    = $scanStamp
+        MaxDepth = $MaxDepth
+        Exclude  = $excludeList
+        UseAclExt = ($null -ne ([System.Management.Automation.PSTypeName]'System.IO.FileSystemAclExtensions').Type)
+    }
+
+    $queue    = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
+    $errQueue = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
+    $counters = [hashtable]::Synchronized(@{ Folders = 0; Done = 0 })
+
+    $pool = [runspacefactory]::CreateRunspacePool(1, $ThrottleLimit)
+    $pool.Open()
+    $handles = [System.Collections.Generic.List[object]]::new()
+
+    foreach ($j in $jobs) {
+        $ps = [powershell]::Create()
+        $ps.RunspacePool = $pool
+        [void]$ps.AddScript($WorkerScript).AddArgument($j).AddArgument($cfg).
+            AddArgument($queue).AddArgument($errQueue).AddArgument($counters)
+        $handles.Add([pscustomobject]@{ PS = $ps; Handle = $ps.BeginInvoke(); Job = $j; Drained = $false })
+    }
+
+    $rowsWritten = 0; $errWritten = 0
+    $doneKeys = [System.Collections.Generic.List[string]]::new()
+    if ($state) { foreach ($c in $state.Completed) { $doneKeys.Add($c) } }
+
+    function Save-State {
+        @{
+            NtfsCsv = $ntfsCsv; ShareCsv = $shareCsv; ErrorCsv = $errCsv
+            Completed = @($doneKeys); Updated = (Get-Date).ToString('s')
+        } | ConvertTo-Json -Depth 3 | Set-Content -Path $stateFile -Encoding UTF8
+    }
+
+    $line = $null
+    $lastSave = [datetime]::Now
+    while ($true) {
+        while ($queue.TryDequeue([ref]$line))    { $ntfsWriter.WriteLine($line); $rowsWritten++ }
+        while ($errQueue.TryDequeue([ref]$line)) { $errWriter.WriteLine($line);  $errWritten++ }
+
+        $finished = 0
+        foreach ($h in $handles) {
+            if ($h.Handle.IsCompleted) {
+                $finished++
+                if (-not $h.Drained) {
+                    $h.Drained = $true
+                    try { $h.PS.EndInvoke($h.Handle) } catch {
+                        Write-Warning "Worker for '$($h.Job.Key)' failed: $($_.Exception.Message)"
+                    }
+                    $h.PS.Dispose()
+                    $doneKeys.Add($h.Job.Key)
+                }
+            }
+        }
+
+        Write-Progress -Activity "Scanning permissions on $Server" `
+            -Status ("{0:N0} folders  |  {1:N0} boundary rows  |  {2}/{3} work items" -f `
+                $counters.Folders, $rowsWritten, $finished, $handles.Count) `
+            -PercentComplete ([math]::Min(100, [int](100 * $finished / [math]::Max(1, $handles.Count))))
+
+        if (([datetime]::Now - $lastSave).TotalSeconds -ge 30) {
+            $ntfsWriter.Flush(); $errWriter.Flush(); Save-State; $lastSave = [datetime]::Now
+        }
+        if ($finished -eq $handles.Count) { break }
+        Start-Sleep -Milliseconds 250
+    }
+
+    # final drain
+    while ($queue.TryDequeue([ref]$line))    { $ntfsWriter.WriteLine($line); $rowsWritten++ }
+    while ($errQueue.TryDequeue([ref]$line)) { $errWriter.WriteLine($line);  $errWritten++ }
+
+    $ntfsWriter.Flush(); $ntfsWriter.Dispose()
+    $errWriter.Flush();  $errWriter.Dispose()
+    $pool.Close(); $pool.Dispose()
+    Write-Progress -Activity "Scanning permissions on $Server" -Completed
+
+    if (Test-Path $stateFile) { Remove-Item $stateFile -Force }
+
+    #endregion
+
+    #region -------------------------------------------------------------- summary
+
+    Write-Host ""
+    Write-Host "Scan complete." -ForegroundColor Green
+    Write-Host ("  folders walked : {0:N0}" -f $counters.Folders)
+    Write-Host ("  boundary rows  : {0:N0}" -f $rowsWritten)
+    Write-Host ("  errors logged  : {0:N0}" -f $errWritten)
+    Write-Host ("  elapsed        : {0:hh\:mm\:ss}" -f $scanWatch.Elapsed)
+    Write-Host ""
+    Write-Host "  $ntfsCsv"
+    Write-Host "  $shareCsv"
+    Write-Host "  $errCsv"
+    Write-Host ""
+    if ($errWritten -gt 0) {
+        Write-Host "Some folders could not be read - review the error CSV. Those folders'" -ForegroundColor Yellow
+        Write-Host "permissions are NOT in this report." -ForegroundColor Yellow
+        Write-Host ""
+    }
+
+    return [pscustomobject]@{ NtfsCsv = $ntfsCsv; ShareCsv = $shareCsv; ErrorCsv = $errCsv; Rows = $rowsWritten; Errors = $errWritten }
+}
+
+#endregion
+
 #region ------------------------------------------------------------------ report
 
 function New-AccessReportFiles {
@@ -928,11 +1493,17 @@ if ($MyInvocation.InvocationName -eq '.') { return }
 
 $ErrorActionPreference = 'Stop'
 $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+$mode = $PSCmdlet.ParameterSetName
+
+# $PSScriptRoot can be empty in Windows PowerShell 5.1 in some hosts, so fall back
+$here = $PSScriptRoot
+if (-not $here -and $MyInvocation.MyCommand.Path) { $here = Split-Path -Parent $MyInvocation.MyCommand.Path }
+if (-not $here) { $here = (Get-Location).ProviderPath }
 
 #region ------------------------------------------------------------------- run
 
 # --- test mode: a few groups straight from AD ---
-if ($PSCmdlet.ParameterSetName -eq 'Groups') {
+if ($mode -eq 'Groups') {
     $server  = $env:COMPUTERNAME
     $outDir  = if ($OutputDirectory) { $OutputDirectory } else { (Get-Location).ProviderPath }
     if (-not (Test-Path -LiteralPath $outDir)) { New-Item -ItemType Directory -Path $outDir -Force | Out-Null }
@@ -957,26 +1528,69 @@ if ($PSCmdlet.ParameterSetName -eq 'Groups') {
     return
 }
 
-# --- find the export set ---
-if ($PSCmdlet.ParameterSetName -eq 'Files') {
-    if (-not (Test-Path -LiteralPath $NtfsCsv -PathType Leaf)) { throw "NTFS CSV not found: $NtfsCsv" }
-    if ($ShareCsv -and -not (Test-Path -LiteralPath $ShareCsv -PathType Leaf)) { throw "Share CSV not found: $ShareCsv" }
-    $ntfsCsv  = (Resolve-Path -LiteralPath $NtfsCsv).ProviderPath
-    $shareCsv = if ($ShareCsv) { (Resolve-Path -LiteralPath $ShareCsv).ProviderPath } else { '' }
+if ($MembersCsv -and -not (Test-Path -LiteralPath $MembersCsv -PathType Leaf)) { throw "Membership CSV not found: $MembersCsv" }
+
+$stepNo = 0
+$stepTotal = [int]($mode -eq 'Scan' -and -not $ListSharesOnly) + [int](-not $MembersCsv -and -not ($mode -eq 'Scan' -and $SkipAd)) + [int](-not ($mode -eq 'Scan' -and $SkipAd))
+function Show-Step([string]$Text) {
+    $script:stepNo++
+    Write-Host ''
+    Write-Host ("Step {0}/{1}: {2}" -f $script:stepNo, $script:stepTotal, $Text) -ForegroundColor Cyan
+}
+
+$ctx = $null
+if ($mode -eq 'Scan') {
+    # --- the CSVs come from scanning this server ---
+    $outDir = if ($OutputDirectory) { $OutputDirectory } else { Join-Path $here 'q report' }
+    Write-Host ''
+    Write-Host "Scanning this server ($env:COMPUTERNAME); files go to: $outDir" -ForegroundColor Cyan
+
+    if (-not ($ListSharesOnly -or $SkipAd -or $MembersCsv)) {
+        # fail now rather than after a scan that can run for hours
+        Write-Host 'Checking Active Directory access first...'
+        $ctx = New-AdContext -DomainController $DomainController
+        Write-Host ("  forest domains: {0}" -f (($ctx.DomainMap.Keys | Sort-Object) -join ', '))
+    }
+
+    if (-not $ListSharesOnly) { Show-Step 'scanning share and NTFS permissions (can take a long time)' }
+    $scanArgs = @{ OutputDirectory = $outDir; MaxDepth = $MaxDepth; ThrottleLimit = $ThrottleLimit }
+    if ($Path)             { $scanArgs.Path = $Path }
+    if ($ShareName)        { $scanArgs.ShareName = $ShareName }
+    if ($ExcludePrincipal) { $scanArgs.ExcludePrincipal = $ExcludePrincipal }
+    if ($IncludeGenericPrincipals) { $scanArgs.IncludeGenericPrincipals = $true }
+    if ($ListSharesOnly)   { $scanArgs.ListSharesOnly = $true }
+    if ($Resume)           { $scanArgs.Resume = $true }
+    $scan = Invoke-PermissionScan @scanArgs
+    if ($ListSharesOnly) { return }
+
+    $ntfsCsv = $scan.NtfsCsv; $shareCsv = $scan.ShareCsv
+    if ($SkipAd) { return }
 }
 else {
-    if (-not $InputDirectory) { $InputDirectory = Join-Path $(if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).ProviderPath }) 'Reports' }
-    $sets = @(Find-ExportSet -Directory $InputDirectory -Date $ScanDate)
-    if ($sets.Count -eq 0) {
-        throw "No export set (NTFS + share CSV with the same server and date) found in $InputDirectory$(if ($ScanDate) { " for $ScanDate" })."
+    # --- the CSVs already exist ---
+    if ($mode -eq 'Files') {
+        if (-not (Test-Path -LiteralPath $NtfsCsv -PathType Leaf)) { throw "NTFS CSV not found: $NtfsCsv" }
+        if ($ShareCsv -and -not (Test-Path -LiteralPath $ShareCsv -PathType Leaf)) { throw "Share CSV not found: $ShareCsv" }
+        $ntfsCsv  = (Resolve-Path -LiteralPath $NtfsCsv).ProviderPath
+        $shareCsv = if ($ShareCsv) { (Resolve-Path -LiteralPath $ShareCsv).ProviderPath } else { '' }
     }
-    $pick = $sets[0]
-    if (@($sets | Where-Object { $_.Date -eq $pick.Date }).Count -gt 1) {
-        Write-Warning "Several servers exported on $($pick.Date); using $($pick.Server). Pass -NtfsCsv to choose another."
+    else {
+        $sets = @(Find-ExportSet -Directory $InputDirectory -Date $ScanDate)
+        if ($sets.Count -eq 0) {
+            $present = @(Get-ChildItem -LiteralPath $InputDirectory -Filter '*.csv' -File | ForEach-Object { $_.Name })
+            $what = if ($present.Count -eq 0) { 'The folder contains no CSV files.' } else { 'CSV files in the folder: ' + ($present -join ', ') }
+            throw ("No export set (NTFS + share CSV with the same server and date) found in $InputDirectory$(if ($ScanDate) { " for $ScanDate" }). $what " +
+                   'Run this script without -InputDirectory on the file server to make them.')
+        }
+        $pick = $sets[0]
+        if (@($sets | Where-Object { $_.Date -eq $pick.Date }).Count -gt 1) {
+            Write-Warning "Several servers exported on $($pick.Date); using $($pick.Server). Pass -NtfsCsv to choose another."
+        }
+        $ntfsCsv = $pick.NtfsCsv; $shareCsv = $pick.ShareCsv
     }
-    $ntfsCsv = $pick.NtfsCsv; $shareCsv = $pick.ShareCsv
+    $outDir = if ($OutputDirectory) { $OutputDirectory } else { Split-Path $ntfsCsv -Parent }
 }
-if ($MembersCsv -and -not (Test-Path -LiteralPath $MembersCsv -PathType Leaf)) { throw "Membership CSV not found: $MembersCsv" }
+if (-not (Test-Path -LiteralPath $outDir)) { New-Item -ItemType Directory -Path $outDir -Force | Out-Null }
 
 if ((Split-Path $ntfsCsv -Leaf) -match '^NTFS_Permissions_(?<srv>.+)_(?<date>\d{8})\.csv$') {
     $server = $Matches['srv']; $date = $Matches['date']
@@ -984,27 +1598,26 @@ if ((Split-Path $ntfsCsv -Leaf) -match '^NTFS_Permissions_(?<srv>.+)_(?<date>\d{
 else {
     $server = $env:COMPUTERNAME; $date = (Get-Date).ToString('yyyyMMdd')
 }
-$outDir = if ($OutputDirectory) { $OutputDirectory } else { Split-Path $ntfsCsv -Parent }
-if (-not (Test-Path -LiteralPath $outDir)) { New-Item -ItemType Directory -Path $outDir -Force | Out-Null }
 
 Write-Host ''
 Write-Host "Access report for $server ($date)" -ForegroundColor Cyan
 Write-Host "  Share : $(if ($shareCsv) { $shareCsv } else { '(none)' })"
 Write-Host "  NTFS  : $ntfsCsv"
 
-# --- step 1: group membership from AD (unless an existing file was given) ---
+# --- group membership from AD (unless an existing file was given) ---
 if ($MembersCsv) {
     $membersCsv = (Resolve-Path -LiteralPath $MembersCsv).ProviderPath
     Write-Host "  Members: $membersCsv (existing file, AD not queried)"
 }
 else {
-    Write-Host ''
-    Write-Host 'Step 1/2: reading group membership from Active Directory' -ForegroundColor Cyan
+    Show-Step 'reading group membership from Active Directory'
     $trustees = @(Get-TrusteeList -NtfsCsv $ntfsCsv -ShareCsv $shareCsv)
     Write-Host ("  {0:N0} distinct trustee(s) to look up" -f $trustees.Count)
 
-    $ctx = New-AdContext -DomainController $DomainController
-    Write-Host ("  forest domains: {0}" -f (($ctx.DomainMap.Keys | Sort-Object) -join ', '))
+    if (-not $ctx) {
+        $ctx = New-AdContext -DomainController $DomainController
+        Write-Host ("  forest domains: {0}" -f (($ctx.DomainMap.Keys | Sort-Object) -join ', '))
+    }
 
     $membersCsv = Join-Path $outDir "AD_Group_Members_${server}_${date}.csv"
     $result = Invoke-GroupMemberExport -Ctx $ctx -Trustee $trustees -OutFile $membersCsv -Server $server `
@@ -1027,9 +1640,8 @@ else {
     }
 }
 
-# --- step 2: the report ---
-Write-Host ''
-Write-Host 'Step 2/2: building the report' -ForegroundColor Cyan
+# --- the report ---
+Show-Step 'building the report'
 $reportFile = Join-Path $outDir "Access_Report_${server}_${date}.csv"
 $files = New-AccessReportFiles -Server $server -ShareCsv $shareCsv -NtfsCsv $ntfsCsv -MembersCsv $membersCsv `
             -OutFile $reportFile -ShareName $ShareName -ExplicitOnly:$ExplicitOnly -MaxRowsPerFile $MaxRowsPerFile

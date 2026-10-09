@@ -9,41 +9,40 @@ ale nie, ktorí zamestnanci v nej sú.
 
 ## Súbory
 
-| Súbor | Čo robí | Kde beží |
-|---|---|---|
-| `Get-FileServerPermissions.ps1` | sken oprávnení, vyrobí `Share_Permissions_*`, `NTFS_Permissions_*`, `Scan_Errors_*` (nezmenený) | file server |
-| `New-AccessReport.ps1` | **všetko ostatné v jednom súbore**: načíta CSV, opýta sa AD na členov skupín (aj vnorených) a zloží report | ľubovoľný doménový Windows |
+| Súbor | Čo robí |
+|---|---|
+| `New-AccessReport.ps1` | **všetko v jednom**: sken oprávnení na file serveri, členovia AD skupín (aj vnorených) a report |
+| `Get-FileServerPermissions.ps1` | pôvodný samostatný sken, nezmenený; jeho logika je teraz súčasťou `New-AccessReport.ps1`, takže ho nepotrebujete |
 
-Nič sa nespúšťa automaticky.
+## Spustenie – jeden príkaz
 
-## Spustenie
-
-Jeden príkaz, z ľubovoľného priečinka, s plnou cestou k skriptu:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File 'C:\scripts\VNET_Samba_Audit\New-AccessReport.ps1' -InputDirectory 'C:\scripts\VNET_Samba_Audit\q report'
-```
-
-Vezme **najnovšiu kompletnú sadu** CSV v priečinku (Share + NTFS s rovnakým serverom a dátumom),
-a vedľa nich zapíše:
-
-- `AD_Group_Members_<server>_<dátum>.csv` – kto je v ktorej skupine (využiteľné aj samostatne),
-- `Access_Report_<server>_<dátum>.csv` – report.
-
-**Najprv skúška, či AD funguje** (nepotrebuje žiadne CSV):
+Na **file serveri** (musí vidieť lokálne zdieľania aj ich oprávnenia), v PowerShelli spustenom
+ako administrátor:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File 'C:\scripts\VNET_Samba_Audit\New-AccessReport.ps1' -Group 'HQ\Domain Admins'
+$ps = if (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh' } else { 'powershell' }; & $ps -ExecutionPolicy Bypass -File 'C:\scripts\VNET_Samba_Audit\New-AccessReport.ps1'
 ```
 
-Užitočné prepínače: `-ShareName 'Hodnotenie*'` (len niektoré zdieľania), `-ExplicitOnly`
-(z NTFS iba oprávnenia nastavené priamo na priečinku, plus koreň zdieľania),
-`-DoNotExpand 'Domain Users'` (skupinu vypíše, ale nerozbalí), `-MaxRowsPerFile 1000000`
-(po tomto počte riadkov začne nový súbor `_part2.csv`, aby ho zvládol Excel),
-`-ScanDate 20260825` (konkrétna sada), `-MembersCsv <súbor>` (použije hotový súbor členov
-a AD sa nepýta), `-DomainController dc01`.
+Bez parametrov spraví tri veci a všetko uloží do `q report` vedľa skriptu
+(`C:\scripts\VNET_Samba_Audit\q report`):
 
-Členstvo sa číta z AD **v čase spustenia**, nie k dátumu skenu.
+1. **sken** – `Share_Permissions_<server>_<dátum>.csv`, `NTFS_Permissions_<server>_<dátum>.csv`,
+   `Scan_Errors_<server>_<dátum>.csv`,
+2. **AD** – `AD_Group_Members_<server>_<dátum>.csv` (kto je v ktorej skupine),
+3. **report** – `Access_Report_<server>_<dátum>.csv`.
+
+AD sa skontroluje **ešte pred skenom**, takže chyba s AD sa ukáže hneď, nie po hodinách.
+Nič sa nemaže ani nemení; staré CSV v priečinku zostávajú (mazanie po čase tu nie je
+implementované).
+
+Iné spôsoby: `-ListSharesOnly` (len vypíše, čo by skenoval), `-Resume` (dokončí prerušený sken),
+`-SkipAd` (len sken, tri CSV), `-ShareName 'Hodnotenie*'` (len niektoré zdieľania),
+`-InputDirectory '<priečinok>'` (bez skenu, z hotových CSV – najnovšia kompletná sada),
+`-Group 'HQ\Domain Admins'` (len test AD, nič neskenuje), `-ExplicitOnly`,
+`-DoNotExpand 'Domain Users'`, `-MaxRowsPerFile 1000000` (po tomto počte riadkov nový súbor
+`_part2.csv`, aby ho zvládol Excel), `-DomainController dc01`, `-MembersCsv <súbor>`.
+
+Členstvo sa číta z AD **v čase spustenia**.
 
 ## Report `Access_Report_*.csv`
 
@@ -95,10 +94,11 @@ stĺpcami.
 ## Testy
 
 ```powershell
-pwsh -File tests\Test-EndToEnd.ps1          # celý príkaz s falošným AD
+pwsh -File tests\Test-EndToEnd.ps1          # celý príkaz (sken, AD, report) s falošným AD
 pwsh -File tests\Test-NewAccessReport.ps1   # report nad vymyslenými CSV
 pwsh -File tests\Test-AdGroupExpansion.ps1  # rozbaľovanie skupín
 ```
 
-(alebo `powershell.exe -File ...`). Bežia bez AD, **nepokrývajú samotné LDAP volania** – tie sa
-dajú overiť iba na doménovom stroji, preto je skúška `-Group`.
+(alebo `powershell.exe -File ...`). Bežia bez AD a bez Windows, takže **nepokrývajú samotné LDAP
+volania ani čítanie ACL zo skutočného file servera**. Prvé spustenie na serveri je ich skutočný test;
+chyba AD sa vtedy ukáže pred skenom.
