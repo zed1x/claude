@@ -103,7 +103,7 @@
 [CmdletBinding(DefaultParameterSetName = 'Directory')]
 param(
     [Parameter(ParameterSetName = 'Directory')]
-    [string]$InputDirectory = (Join-Path $PSScriptRoot 'Reports'),
+    [string]$InputDirectory,
 
     [Parameter(ParameterSetName = 'Directory')]
     [ValidatePattern('^\d{8}$')]
@@ -965,6 +965,7 @@ if ($PSCmdlet.ParameterSetName -eq 'Files') {
     $shareCsv = if ($ShareCsv) { (Resolve-Path -LiteralPath $ShareCsv).ProviderPath } else { '' }
 }
 else {
+    if (-not $InputDirectory) { $InputDirectory = Join-Path $(if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).ProviderPath }) 'Reports' }
     $sets = @(Find-ExportSet -Directory $InputDirectory -Date $ScanDate)
     if ($sets.Count -eq 0) {
         throw "No export set (NTFS + share CSV with the same server and date) found in $InputDirectory$(if ($ScanDate) { " for $ScanDate" })."

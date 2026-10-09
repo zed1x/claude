@@ -81,6 +81,11 @@ function Get-AdGroupMemberRecords { param($Ctx, $Group) foreach ($m in $script:m
     Set-Content -LiteralPath (Join-Path $inbox 'Share_Permissions_SRV020_20260725.csv') -Value 'x'
     Set-Content -LiteralPath (Join-Path $inbox 'NTFS_Permissions_SRV020_20260901.csv') -Value 'x'
 
+    # Windows PowerShell 5.1 leaves $PSScriptRoot empty in a param default, which broke -Group on the server
+    $tokens = $null; $errors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($real, [ref]$tokens, [ref]$errors)
+    Assert-Equal ($ast.ParamBlock.Extent.Text -match 'PSScriptRoot') $false 'param block does not use $PSScriptRoot'
+
     # --- one command, the way it is run -------------------------------------------------------
     $r = Invoke-Copy @('-InputDirectory', $inbox)
     if ($r.Code -ne 0) { Write-Host $r.Text }
