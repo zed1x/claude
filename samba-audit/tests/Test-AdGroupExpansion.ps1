@@ -1,18 +1,18 @@
 <#
 .SYNOPSIS
-    Offline tests for Get-ADGroupMembers.ps1. No Active Directory needed.
+    Offline tests for the AD group expansion inside New-AccessReport.ps1. No Active Directory needed.
 
 .DESCRIPTION
     Replaces the three functions that talk to AD with a small in-memory directory, then
     runs the real input reading, group expansion and CSV writing against it.
     What this does NOT cover is the LDAP layer itself (New-AdContext, Find-AdAccount,
     Get-AdGroupMemberRecords and the helpers under them) - use
-    .\Get-ADGroupMembers.ps1 -Group 'DOMAIN\SomeGroup' on a domain-joined machine for that.
+    .\New-AccessReport.ps1 -Group 'DOMAIN\SomeGroup' on a domain-joined machine for that.
 
-    Run:  pwsh -File tests\Test-GetADGroupMembers.ps1      (or powershell.exe -File ...)
+    Run:  pwsh -File tests\Test-AdGroupExpansion.ps1      (or powershell.exe -File ...)
 #>
 $ErrorActionPreference = 'Stop'
-. (Join-Path $PSScriptRoot '..\Get-ADGroupMembers.ps1')
+. (Join-Path $PSScriptRoot '..\New-AccessReport.ps1')
 
 $script:failed = 0
 $script:passed = 0

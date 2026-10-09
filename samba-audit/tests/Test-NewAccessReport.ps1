@@ -1,6 +1,7 @@
 <#
 .SYNOPSIS
-    Offline tests for New-AccessReport.ps1. Runs the real script over small made-up CSVs.
+    Offline tests for the report part of New-AccessReport.ps1. Runs the real script over small made-up CSVs
+    with an existing membership file, so Active Directory is never queried.
 
     Run:  pwsh -File tests\Test-NewAccessReport.ps1      (or powershell.exe -File ...)
 #>
@@ -73,9 +74,10 @@ try {
 
     $expectedHeader = 'Server,Layer,ShareName,FolderPath,RelativePath,BoundaryType,Trustee,TrusteeKind,AccessType,Rights,RightsDetail,AppliesTo,IsInherited,InheritedFrom,GroupStatus,Person,PersonName,PersonType,Enabled,Via,NestingLevel,ParentGroup,MembershipPath'
     $outFile = Join-Path $tmp 'Access_Report_SRV020_20260825.csv'
+    $membersPath = Join-Path $tmp 'AD_Group_Members_SRV020_20260825.csv'
 
     # --- full report ---------------------------------------------------------------
-    $r = Invoke-Report @('-InputDirectory', $tmp)
+    $r = Invoke-Report @('-InputDirectory', $tmp, '-MembersCsv', $membersPath)
     Assert-Equal $r.Code 0 'full: exit code'
     if ($r.Code -ne 0) { Write-Host $r.Text }
     Assert-Equal (Test-Path $outFile) $true 'full: report written'
@@ -137,21 +139,21 @@ try {
 
     # --- filters -------------------------------------------------------------------
     Remove-Item $outFile
-    $r = Invoke-Report @('-InputDirectory', $tmp, '-ExplicitOnly')
+    $r = Invoke-Report @('-InputDirectory', $tmp, '-MembersCsv', $membersPath, '-ExplicitOnly')
     $rows = @(Import-Csv -LiteralPath $outFile -Encoding UTF8)
     Assert-Equal $rows.Count 21 'ExplicitOnly: row count'
     Assert-Equal @($rows | Where-Object { $_.Layer -eq 'NTFS' -and $_.IsInherited -eq 'True' -and $_.BoundaryType -ne 'Root' }).Count 0 'ExplicitOnly: no inherited non-root entries'
     Assert-Equal @($rows | Where-Object { $_.BoundaryType -eq 'Root' -and $_.Trustee -eq 'HQ\GrpA' }).Count 3 'ExplicitOnly: share root kept in full'
 
     Remove-Item $outFile
-    $r = Invoke-Report @('-InputDirectory', $tmp, '-ShareName', 'Priv')
+    $r = Invoke-Report @('-InputDirectory', $tmp, '-MembersCsv', $membersPath, '-ShareName', 'Priv')
     $rows = @(Import-Csv -LiteralPath $outFile -Encoding UTF8)
     Assert-Equal $rows.Count 2 'ShareName filter: row count'
     Assert-Equal (@($rows.ShareName | Select-Object -Unique) -join ',') 'Priv' 'ShareName filter: only that share'
 
     # --- splitting -----------------------------------------------------------------
     Remove-Item (Join-Path $tmp 'Access_Report_*') -Force
-    $r = Invoke-Report @('-InputDirectory', $tmp, '-MaxRowsPerFile', '10')
+    $r = Invoke-Report @('-InputDirectory', $tmp, '-MembersCsv', $membersPath, '-MaxRowsPerFile', '10')
     $files = @(Get-ChildItem $tmp -Filter 'Access_Report_SRV020_20260825*.csv' | Sort-Object Name)
     Assert-Equal ($files.Count -gt 1) $true 'split: several files'
     $total = 0
@@ -171,10 +173,9 @@ try {
     Assert-Equal $r.Code 0 'explicit files: exit code'
     Assert-Equal (Test-Path (Join-Path $tmp 'out\Access_Report_SRV020_20260825.csv')) $true 'explicit files: -OutputDirectory honoured'
 
-    Move-Item (Join-Path $tmp 'AD_Group_Members_SRV020_20260825.csv') (Join-Path $tmp 'hidden.csv')
-    $r = Invoke-Report @('-InputDirectory', $tmp)
+    $r = Invoke-Report @('-InputDirectory', $tmp, '-MembersCsv', (Join-Path $tmp 'nope.csv'))
     Assert-Equal ($r.Code -ne 0) $true 'missing members file: fails'
-    Assert-Equal ($r.Text -match 'Get-ADGroupMembers\.ps1') $true 'missing members file: tells you what to run'
+    Assert-Equal ($r.Text -match 'Membership CSV not found') $true 'missing members file: says so'
     Assert-Equal (Test-Path $outFile) $false 'missing members file: no report written'
 }
 finally {
